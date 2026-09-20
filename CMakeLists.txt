@@ -1,0 +1,11 @@
+cmake_minimum_required(VERSION 3.22)
+project(stm_sdram C)
+
+# 与 stm_log 一致：独立静态库，公开头文件，并可自动传递 CubeMX HAL 配置。
+option(STM_SDRAM_LINK_CUBEMX "Link stm32cubemx target automatically" ON)
+add_library(stm_sdram STATIC stm_sdram.c)
+target_compile_features(stm_sdram PUBLIC c_std_11)
+target_include_directories(stm_sdram PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+if(STM_SDRAM_LINK_CUBEMX AND TARGET stm32cubemx)
+    target_link_libraries(stm_sdram PUBLIC stm32cubemx)
+endif()

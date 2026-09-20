@@ -1,0 +1,11 @@
+/build/
+__pycache__/
+
+.venv/
+*.pyc
+*.elf
+*.o
+*.obj
+*.a
+*.map
+*.log
