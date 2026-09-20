@@ -6,22 +6,28 @@
 
 ## 安装
 
-需要 C11、STM32H7 HAL/CMSIS 和 [stm_common](https://github.com/NingZiXi/stm_common)。在 STM32CubeMX 工程根目录执行：
+需要 C11、CMake 3.22+、STM32H7 HAL/CMSIS 和 [stm_common](https://github.com/NingZiXi/stm_common)。使用 CMake 时可自动拉取公共依赖，只需在 STM32CubeMX 工程根目录克隆本组件：
 
 ```sh
-git clone https://github.com/NingZiXi/stm_common.git Lib/stm_common
 git clone https://github.com/NingZiXi/stm_sdram.git Lib/stm_sdram
 ```
 
 在 HAL 配置目标创建后加入：
 
 ```cmake
-add_subdirectory(Lib/stm_common)
 add_subdirectory(Lib/stm_sdram)
 target_link_libraries(your_firmware PRIVATE stm_sdram)
 ```
 
-将 `your_firmware` 替换为实际固件目标。组件存在同级 `stm_common` 时也可自动添加它。
+将 `your_firmware` 替换为实际固件目标。公共依赖按以下顺序解析：已有 `stm_common` target → 同级 `stm_common/` → FetchContent 下载 **v1.0.0** 对应的固定提交 `ce3d186dde2d374a8e9c7b9068a7b88f97d57dc1`。Flash 与 SDRAM 共用一个 target，不重复下载。
+
+自动下载默认使用 GitHub，需要 Git 和网络；源码位于构建目录的 `_deps/stm_common-src`。如需使用 Gitee，在添加任意驱动前设置：
+
+```cmake
+set(STM_COMMON_GIT_REPOSITORY "https://gitee.com/nzxhg/stm_common.git" CACHE STRING "")
+```
+
+离线构建可提前提供 target 或同级目录，并设置 `STM_COMMON_FETCH=OFF` 禁止自动拉取；依赖缺失会在配置阶段明确报错。也可在启用自动依赖解析时通过 `FETCHCONTENT_SOURCE_DIR_STM_COMMON` 指定已有源码的绝对路径。切换仓库地址时更新 CMake 缓存或使用新的构建目录。手动提供的依赖版本由工程负责，建议使用 v1.0.0。
 默认继承已有 `stm32cubemx` target 的 HAL 头文件和芯片宏；其他构建方式设置 `STM_SDRAM_LINK_CUBEMX=OFF`，自行提供 HAL/CMSIS 头文件、芯片宏及 HAL 实现。
 Keil/IAR 工程可手动加入组件 `.c`，将组件目录和 `stm_common` 加入 include 路径。
 `STM_SDRAM_HAL_HEADER` 可指定其他 HAL 头文件，但不代表支持其他 STM32 系列。
