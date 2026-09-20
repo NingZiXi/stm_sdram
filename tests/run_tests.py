@@ -20,6 +20,7 @@ def run(elf, entry, fault=None, interrupt=False):
     uc.mem_map(0x10000, 0x100000)
     uc.mem_map(0x20000000, 0x200000)
     uc.mem_map(0xD0000000, 0x2000000)
+    uc.mem_map(0x58024000, 0x1000)  # RCC register space for FMC clock selection.
     for segment in elf.iter_segments():
         if segment["p_type"] == "PT_LOAD":
             uc.mem_write(segment["p_vaddr"], segment.data())
@@ -74,7 +75,7 @@ def main():
     if not project and not args.include:
         project = next((p for p in COMPONENT.parents if (p / "Core/Inc").is_dir()
                         and (p / "Drivers/STM32H7xx_HAL_Driver/Inc").is_dir()), None)
-    includes = [COMPONENT]
+    includes = [COMPONENT, COMPONENT.parent / "stm_common"]
     if project:
         includes += [project / path for path in ("Core/Inc", "Drivers/STM32H7xx_HAL_Driver/Inc",
                      "Drivers/CMSIS/Device/ST/STM32H7xx/Include", "Drivers/CMSIS/Include")]
@@ -102,12 +103,13 @@ def main():
         with binary.open("rb") as stream:
             elf = ELFFile(stream)
             run(elf, "test_entry")
+            run(elf, "test_handle_entry")
             run(elf, "test_lifecycle_entry")
             run(elf, "test_interrupt_entry", interrupt=True)
             run(elf, "test_fault_entry", "stuck_d0")
             run(elf, "test_address_fault_entry", "address_alias")
             run(elf, "test_progress_fault_entry", "address_alias")
-        print(f"PASS {optimize}: init/retry, context guards, HAL failures, bounds, data, disable/recovery, progress/cancel, self-test, injected faults")
+        print(f"PASS {optimize}: create/retry, context guards, HAL failures, bounds, data, delete/recreate, progress/cancel, self-test, injected faults")
 
 
 if __name__ == "__main__":

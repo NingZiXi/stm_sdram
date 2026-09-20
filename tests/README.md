@@ -1,32 +1,26 @@
 # 软件测试
 
-测试编译组件的真实 C 源码，用 HAL 桩和 Unicorn 执行 Cortex-M7 指令，不连接开发板。
-不模拟 FMC 时序、刷新电路、MPU 或 Cache，不能据此判断硬件稳定性。
+编译真实 `stm_sdram.c`，使用 HAL 桩和 Unicorn 执行 Cortex-M7 指令，不连接开发板。需要 ARM GCC、Python 3，以及提供 STM32H7 HAL/CMSIS 头文件的 CubeMX 工程。共享测试分配器来自同级 [stm_common](https://github.com/NingZiXi/stm_common)。
 
-已验证工具：GNU Tools for STM32 GCC 12.3.1、Unicorn 2.1.4、pyelftools 0.32。
-Python 依赖固定在 `requirements.txt`，推荐放在虚拟环境中：
-
-以下命令在独立组件仓库根目录运行：
+在当前组件仓库根目录运行（以下为 Windows PowerShell 示例）：
 
 ```powershell
-python -m venv build/sdram-venv
-build/sdram-venv/Scripts/python -m pip install -r tests/requirements.txt
-build/sdram-venv/Scripts/python tests/run_tests.py --project-root D:/path/to/h7-project
+python -m venv .venv
+.venv/Scripts/python -m pip install -r tests/requirements.txt
+.venv/Scripts/python tests/run_tests.py --project-root D:/path/to/stm32h7-project
 ```
 
-运行器从组件位置向上寻找含 `Core/Inc` 和 H7 HAL 驱动目录的工程，不依赖调用时的工作目录。
-组件迁出当前工程后，可以显式指定提供 HAL/CMSIS 头文件的 CubeMX 工程：
+Linux/macOS 使用 `.venv/bin/python`。运行器可自动向上查找 CubeMX 工程；独立克隆时建议显式传 `--project-root`。
+非标准目录可重复传 `--include` 指定 HAL、HAL 配置和 CMSIS 目录；显式 include 且未指定 project-root 时不自动加宿主路径。
+`--compiler` 指定编译器，`--mcu` 默认 STM32H723xx，`--build-dir` 指定产物目录，`--python-deps` 指定预安装 Python 依赖目录。切换 MCU 宏不表示新芯片已获硬件验证。
 
-```powershell
-python path/to/stm_sdram/tests/run_tests.py --project-root D:/path/to/h7-project --build-dir D:/temp/sdram-tests
-```
+已验证 GNU Arm GCC 12.3.1、Unicorn 2.1.4、pyelftools 0.32；在 O0/O2/Os 下使用 Wall/Wextra/Werror，失败返回非零退出码和 C 测试行号。
 
-目录结构不同的工程可重复传入 `--include`，分别指向 HAL、HAL 配置、CMSIS Core 和设备头文件目录。
-显式 `--include` 且不指定 `--project-root` 时，不自动添加原工程目录。
-`--compiler` 可指定 ARM GCC 路径，`--mcu` 可指定 H7 Cortex-M7 芯片宏，默认 `STM32H723xx`。
-更换芯片宏只改变编译目标选择，不表示该芯片经过硬件验证。
-`--python-deps` 可指定用 pip `--target` 安装依赖的目录，缺少依赖或头文件时返回明确错误。
+## 覆盖范围
 
-测试覆盖初始化/重试、上下文、读写边界、数据线与地址别名故障、停用和恢复、进度单调性、
-4096 字节通知间隔、尾块、全部通知点取消及失败自动停用，分别在 `-O0/-O2/-Os` 下运行。
-测试失败以非零退出码和 C 文件行号报告。
+- 创建分配失败、失败资源回收、重复创建、配置快照、删除清空、20 次创建/删除循环及泄漏/重复释放检查。
+- HAL 配置、调用上下文、地址和长度溢出、容量边界。
+- 初始化命令顺序、Bank/CAS/刷新计算、每步 HAL 失败、恢复后重建。
+- 16 位访问对齐、跨 16 MiB、子区域边界、进度单调及各通知点取消、数据位固定和地址混叠故障。
+
+模型不模拟 GPIO、电源、真实外设时序、MPU/Cache 或器件内部电路。软件通过不能替代硬件验证；实板覆盖范围见 [README](../README.md#验证)。

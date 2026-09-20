@@ -1,9 +1,10 @@
 /build/
 __pycache__/
-
 .venv/
 *.pyc
 *.elf
+*.bin
+*.hex
 *.o
 *.obj
 *.a

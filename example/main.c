@@ -1,40 +1,40 @@
 /**
  * @file    main.c
- * @brief   stm_sdram 板级初始化和最小读写示例
+ * @brief   sdram 组件板级初始化和最小使用示例
  */
 #include "stm_sdram.h"
-#include "fmc.h"
+#include "main.h"
 #include "gpio.h"
+#include "fmc.h"
 
-static stm_sdram_t sdram;          // 零初始化，使用期间保持有效。
-
+volatile stm_err_t example_result = STM_OK;
 static void board_init(void);
 
-// 初始化 SDRAM 并校验两个半字
+// 初始化设备、访问数据并释放组件对象
 int main(void)
 {
-    uint16_t tx[] = {0x1234U, 0xABCDU};
-    uint16_t rx[2] = {0};
-    stm_sdram_status_t status;
-
     board_init();
-
-    // W9825G6KH-6 的全行刷新周期为 64 ms。
-    status = sdram_init(&sdram, &hsdram1, 64U);
-    if (status != STM_SDRAM_OK) { return (int)status; }
-
+    sdram_handle_t device = NULL;
+    const sdram_config_t config = {
+        .hal = &hsdram1,
+        .refresh_period_ms = 64U,
+    };
+    example_result = sdram_create(&config, &device);
+    const uint16_t tx[] = {0x1234U, 0xABCDU};
+    uint16_t rx[2] = {0};
     // 覆盖 SDRAM 起始 4 字节。
-    status = sdram_write16(&sdram, 0U, tx, 2U);
-    if (status != STM_SDRAM_OK) { return (int)status; }
-
-
-    status = sdram_read16(&sdram, 0U, rx, 2U);
-    if (status != STM_SDRAM_OK) { return (int)status; }
-    if (rx[0] != tx[0] || rx[1] != tx[1]) {
-        return (int)STM_SDRAM_ERROR_VERIFY;
+    if (example_result == STM_OK) {
+        example_result = sdram_write16(device, 0U, tx, 2U);
     }
-
-    return 0;
+    if (example_result == STM_OK) {
+        example_result = sdram_read16(device, 0U, rx, 2U);
+    }
+    if (example_result == STM_OK && (rx[0] != tx[0] || rx[1] != tx[1])) {
+        example_result = STM_ERR_VERIFY;
+    }
+    stm_err_t cleanup = sdram_delete(&device);
+    if (example_result == STM_OK) { example_result = cleanup; }
+    for (;;) { __WFI(); }
 }
 
 // 初始化本板 HAL、时钟、GPIO、FMC 和 MPU
@@ -110,7 +110,7 @@ static void board_init(void)
     MX_FMC_Init();
 
     // Region 1：32 MiB，Normal non-cacheable、不可执行。
-    // sdram_init() 成功前不可读写 SDRAM。
+    // sdram_create() 成功前不可读写 SDRAM。
     HAL_MPU_Disable();
     region.Number = MPU_REGION_NUMBER1;
     region.BaseAddress = 0xD0000000UL;
