@@ -17,7 +17,7 @@ int main(void)
     sdram_handle_t device = NULL;
     const sdram_config_t config = {
         .hal = &hsdram1,
-        .refresh_period_ms = 64U,
+        .device = &sdram_device_w9825g6kh_6,
     };
     example_result = sdram_create(&config, &device);
     const uint16_t tx[] = {0x1234U, 0xABCDU};

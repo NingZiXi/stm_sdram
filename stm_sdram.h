@@ -13,7 +13,7 @@
 #endif
 #include STM_SDRAM_HAL_HEADER
 
-#define STM_SDRAM_VERSION "2.0.0"
+#define STM_SDRAM_VERSION "3.0.0"
 
 #ifdef __cplusplus
 extern "C" {
@@ -22,13 +22,29 @@ extern "C" {
 // 由 create 创建、delete 释放的不透明句柄
 typedef struct sdram_context *sdram_handle_t;
 
+// 器件约束快照，create 会复制；时序顺序与 FMC 的七个参数一致。
+typedef struct {
+    uint32_t refresh_period_ms; // 全行刷新周期，1～1000 ms；由温度等级决定
+    uint32_t startup_delay_ms; // CLK_ENABLE 后最小等待，1～1000 ms
+    uint32_t max_clock_hz; // 当前工作条件允许的最高 SDCLK
+    uint32_t timing_ns[7]; // tMRD、tXSR、tRAS、tRC、tWR、tRP、tRCD 的最小 ns
+    uint8_t timing_cycles[7]; // 同一时序的最小周期；与 ns 要求取较大值
+    uint8_t row_bits, column_bits, internal_banks, bus_width_bits;
+    uint8_t cas_mask; // bit N 表示允许 CAS N；当前后端仅接受 CAS2/3
+    uint8_t auto_refresh_cycles; // 上电刷新命令次数，1～16
+} sdram_device_t;
+
+// 保守的 <=100 MHz、CAS3、16 位参考工作点，其他条件由用户提供配置。
+extern const sdram_device_t sdram_device_w9825g6kh_6;
+
 typedef struct {
     SDRAM_HandleTypeDef *hal; // 已初始化并在句柄使用期间保持有效的 HAL 外设
-    uint32_t refresh_period_ms; // 芯片全行刷新周期，1～1000 ms
+    const sdram_device_t *device; // 必填，预置型号或用户自定义参数；仅创建时读取
 } sdram_config_t;
 
 // 可通过 get_info 查询的只读快照
 typedef struct {
+    uint8_t row_bits, column_bits, internal_banks, bus_width_bits, cas_latency;
     uintptr_t base;                    // SDRAM 映射起始地址
     uint32_t size_bytes;               // SDRAM 容量，单位字节
     uint32_t clock_hz;                 // SDRAM 时钟频率，单位 Hz，向下取整

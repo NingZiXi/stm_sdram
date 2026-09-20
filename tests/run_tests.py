@@ -20,6 +20,7 @@ def run(elf, entry, fault=None, interrupt=False):
     uc.mem_map(0x10000, 0x100000)
     uc.mem_map(0x20000000, 0x200000)
     uc.mem_map(0xD0000000, 0x2000000)
+    uc.mem_map(0x52004000, 0x1000)  # FMC SDRAM timing registers.
     uc.mem_map(0x58024000, 0x1000)  # RCC register space for FMC clock selection.
     for segment in elf.iter_segments():
         if segment["p_type"] == "PT_LOAD":
@@ -97,13 +98,15 @@ def main():
                    "-DUSE_HAL_DRIVER", f"-D{args.mcu}", "-nostdlib",
                    "-Wl,-Ttext=0x11000,-Tdata=0x20000000,-e,test_entry"]
         command += [f"-I{path}" for path in includes]
-        command += [str(COMPONENT / "stm_sdram.c"), str(Path(__file__).with_name("test_sdram.c")),
+        command += [str(COMPONENT / "stm_sdram.c"), str(COMPONENT / "private/sdram_devices.c"),
+                    str(COMPONENT / "private/sdram_fmc_h7.c"), str(Path(__file__).with_name("test_sdram.c")),
                     "-lgcc", "-o", str(binary)]
         subprocess.run(command, check=True)
         with binary.open("rb") as stream:
             elf = ELFFile(stream)
             run(elf, "test_entry")
             run(elf, "test_handle_entry")
+            run(elf, "test_v3_entry")
             run(elf, "test_lifecycle_entry")
             run(elf, "test_interrupt_entry", interrupt=True)
             run(elf, "test_fault_entry", "stuck_d0")

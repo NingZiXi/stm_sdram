@@ -4,18 +4,33 @@
 
 实测器件 **W9825G6KH-6（32 MiB）**。不依赖 RTOS、日志或 RTT；当前支持 CPU 同步访问、Normal non-cacheable MPU 映射，不提供 DMA、Cache 一致性维护或低功耗自刷新接口。
 
+**v3.0.0** 将器件参数、FMC 平台实现和通用读写分开。创建时必须指定 `device`，可使用 `sdram_device_w9825g6kh_6` 预置或用户自定义 `sdram_device_t`。SDRAM 没有通用 JEDEC ID 自动识别，应用必须根据实际硬件选型填写；提供自定义参数不等于该芯片已获验证。
+
 ## 安装
 
 需要 C11、CMake 3.22+、STM32H7 HAL/CMSIS 和 [stm_common](https://github.com/NingZiXi/stm_common)。使用 CMake 时可自动拉取公共依赖，只需在 STM32CubeMX 工程根目录克隆本组件：
 
 ```sh
-git clone https://github.com/NingZiXi/stm_sdram.git Lib/stm_sdram
+git clone --branch v3.0.0 https://github.com/NingZiXi/stm_sdram.git Lib/stm_sdram
 ```
 
 在 HAL 配置目标创建后加入：
 
 ```cmake
 add_subdirectory(Lib/stm_sdram)
+target_link_libraries(your_firmware PRIVATE stm_sdram)
+```
+
+也可用 FetchContent 替代上述克隆和 `add_subdirectory`，通过发布标签固定版本：
+
+```cmake
+include(FetchContent)
+FetchContent_Declare(stm_sdram
+    GIT_REPOSITORY https://gitee.com/nzxhg/stm_sdram.git
+    GIT_TAG v3.0.0
+    SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/Lib/stm_sdram
+)
+FetchContent_MakeAvailable(stm_sdram)
 target_link_libraries(your_firmware PRIVATE stm_sdram)
 ```
 
@@ -29,7 +44,7 @@ set(STM_COMMON_GIT_REPOSITORY "https://gitee.com/nzxhg/stm_common.git" CACHE STR
 
 离线构建可提前提供 target 或同级目录，并设置 `STM_COMMON_FETCH=OFF` 禁止自动拉取；依赖缺失会在配置阶段明确报错。也可在启用自动依赖解析时通过 `FETCHCONTENT_SOURCE_DIR_STM_COMMON` 指定已有源码的绝对路径。切换仓库地址时更新 CMake 缓存或使用新的构建目录。手动提供的依赖版本由工程负责，建议使用 v1.0.0。
 默认继承已有 `stm32cubemx` target 的 HAL 头文件和芯片宏；其他构建方式设置 `STM_SDRAM_LINK_CUBEMX=OFF`，自行提供 HAL/CMSIS 头文件、芯片宏及 HAL 实现。
-Keil/IAR 工程可手动加入组件 `.c`，将组件目录和 `stm_common` 加入 include 路径。
+Keil/IAR 工程手动加入 `stm_sdram.c`、`private/sdram_devices.c`、`private/sdram_fmc_h7.c`，将组件目录和 `stm_common` 加入 include 路径。
 `STM_SDRAM_HAL_HEADER` 可指定其他 HAL 头文件，但不代表支持其他 STM32 系列。
 
 组件对象仅在创建/删除时使用 `calloc/free`，读写不分配内存。须提供内部 RAM 堆，例如 STM32CubeMX 的 `sysmem.c` / `_sbrk`，不能把堆放在尚未初始化的外部存储中。
@@ -56,6 +71,24 @@ Keil/IAR 工程可手动加入组件 `.c`，将组件目录和 `stm_common` 加�
 GPIO、行列和时序由 CubeMX 根据具体芯片配置，注意包括最高地址线和两根字节掩码 DQM。上述周期数只适用于对应时钟和芯片，改变时钟后须重新核对。
 组件推导容量并计算刷新计数，向下取整再减 20 个 SDCLK；执行时钟使能、预充电、8 次自动刷新及模式寄存器加载。模式为 BL=1、顺序突发、单位置写突发。
 
+预置参数是保守的 **不超过 100 MHz、CAS3、16 位**工作点，不代表芯片全部频率等级。创建前检查 HAL 行列、Bank、总线宽度、CAS 和频率，再读取 FMC SDTR 实际寄存器核对七项最小时序；Bank2 的 tRC/tRP 使用共享 SDTR1。周期要求取 `timing_cycles[i]` 与 `ceil(timing_ns[i] × SDCLK)` 的较大值，不会自动修改 CubeMX 的外设配置。
+
+## 自定义器件参数
+
+可以复制预置参数后按数据手册修改，例如更严格的温度刷新要求：
+
+```c
+sdram_device_t device = sdram_device_w9825g6kh_6;
+device.refresh_period_ms = 32U;
+const sdram_config_t config = {.hal = &hsdram1, .device = &device};
+```
+
+`device` 在创建时复制，调用后可释放或修改原配置；HAL 句柄仍须保持有效。参数包含行列、内部 Bank、总线宽度、CAS 掩码、最高时钟、全行刷新周期、上电等待和初始刷新次数。`timing_ns[7]` / `timing_cycles[7]` 的顺序为 tMRD、tXSR、tRAS、tRC、tWR、tRP、tRCD，每项至少指定一个非零要求。行刷新数当前按 `2^row_bits` 计算。
+
+当前后端只接受 16 位、BL1、禁止读突发、CAS2/3 以及 HCLK 时钟源。其他总线宽度、模式和控制器需要新增平台实现与验证；不能仅修改参数绕过限制。`read16/write16/fill16` 的数量仍为 16 位元素数，不随物理总线宽度改变。
+
+扩展时在 `private/sdram_devices.c` 增加经过核对的预置；FMC 时钟、寄存器和上电命令集中在 `private/sdram_fmc_h7.c`，通用生命周期、读写和自检位于 `stm_sdram.c`。
+
 ## 使用示例
 
 板级初始化完成后：
@@ -66,7 +99,7 @@ GPIO、行列和时序由 CubeMX 根据具体芯片配置，注意包括最高�
 sdram_handle_t ram = NULL;
 const sdram_config_t config = {
     .hal = &hsdram1,
-    .refresh_period_ms = 64U,
+    .device = &sdram_device_w9825g6kh_6,
 };
 uint16_t tx[] = {0x1234U, 0xA55AU};
 uint16_t rx[2] = {0};
@@ -92,7 +125,7 @@ if (err == STM_OK) { err = cleanup; }
 | 函数 | 行为 |
 |---|---|
 | sdram_create / sdram_delete | 创建初始化 / 释放句柄 |
-| sdram_get_info | 查询基地址、容量、时钟、刷新计数、HAL 状态及 ready |
+| sdram_get_info | 查询行列、内部 Bank、总线宽度、CAS、基地址、容量、时钟、刷新计数、HAL 状态及 ready |
 | sdram_read16 / sdram_write16 | 16 位元素读写 |
 | sdram_fill16 | 用固定半字填充 |
 | sdram_test | 数据线及地址模式自检，覆盖测试范围原数据 |
@@ -121,7 +154,7 @@ HAL_TIMEOUT 映射为 STM_ERR_TIMEOUT，HAL_ERROR/HAL_BUSY 为 STM_ERR_IO。当�
 ## 验证
 
 - 软件：真实驱动在 Cortex-M7 模拟环境执行，O0/O2/Os 均通过，覆盖初始化、刷新计算、HAL 故障、边界、进度取消、数据位/地址混叠及对象生命周期；见 [tests/README.md](tests/README.md)。
-- 实板：STM32H723ZG + W9825G6KH-6，约 91.67 MHz；20 次创建/删除、两轮全 32 MiB 自检、跨 16 MiB 读写以及三个区域的 2 秒保持检查通过。
+- 实板基线（重构前 v2）：STM32H723ZG + W9825G6KH-6，约 91.67 MHz；20 次创建/删除、两轮全 32 MiB 自检、跨 16 MiB 读写以及三个区域的 2 秒保持检查通过。v3 已完成软件回归和编译检查，尚未重新进行硬件验证。
 - 未覆盖：长期保持、温度范围、DMA/Cache、外部堆、自刷新及整板断电循环。其他板卡仍须独立验证。
 
 规格参考：[W9825G6KH 数据手册](https://atta.szlcsc.com/upload/public/pdf/source/20170316/1489630415513.pdf)。

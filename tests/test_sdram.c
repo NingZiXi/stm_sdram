@@ -15,7 +15,14 @@ static HAL_StatusTypeDef injected_status;
 // 用简短测试配置调用公开创建接口
 static stm_err_t create_device(sdram_handle_t *out, SDRAM_HandleTypeDef *hal, uint32_t value)
 {
-    const sdram_config_t config = {.hal = hal, .refresh_period_ms = value};
+    sdram_device_t device = sdram_device_w9825g6kh_6;
+    device.refresh_period_ms = value;
+    // 现有几何推导测试使用显式自定义参数；预置不接受错误行列。
+    if (hal != NULL && hal->Init.RowBitsNumber == FMC_SDRAM_ROW_BITS_NUM_12) {
+        device.row_bits = 12U;
+        device.cas_mask = 1U << 2U;
+    }
+    const sdram_config_t config = {.hal = hal, .device = &device};
     return sdram_create(&config, out);
 }
 
@@ -25,6 +32,15 @@ static sdram_info_t info(sdram_handle_t handle)
     sdram_info_t result = {0};
     (void)sdram_get_info(handle, &result);
     return result;
+}
+
+// 提供结构体快照复制所需的测试运行时。
+void *memcpy(void *dst, const void *src, size_t size)
+{
+    uint8_t *out = dst;
+    const uint8_t *in = src;
+    while (size-- != 0U) { *out++ = *in++; }
+    return dst;
 }
 
 // 填充测试运行时内存
@@ -92,7 +108,54 @@ static SDRAM_HandleTypeDef fixture(void)
     h.Init.SDClockPeriod = FMC_SDRAM_CLOCK_PERIOD_3;
     h.Init.ReadBurst = FMC_SDRAM_RBURST_DISABLE;
     h.Init.WriteProtection = FMC_SDRAM_WRITE_PROTECTION_DISABLE;
+    // 2/8/5/7/3/2/2 周期，与参考板 FMC 配置一致。
+    h.Instance->SDTR[0] = h.Instance->SDTR[1] = 1U | (7U << 4U) | (4U << 8U) |
+        (6U << 12U) | (2U << 16U) | (1U << 20U) | (1U << 24U);
     return h;
+}
+
+// 验证器件参数、实际 FMC 时序、共享字段与配置快照。
+int test_v3_entry(void)
+{
+    SDRAM_HandleTypeDef h = fixture();
+    sdram_handle_t d = NULL;
+    sdram_device_t device = sdram_device_w9825g6kh_6;
+    sdram_config_t config = {.hal = &h, .device = &device};
+    config.device = NULL;
+    CHECK(sdram_create(&config, &d) == STM_ERR_INVALID_ARG && calls == 0U);
+    config.device = &device;
+    device.column_bits = 8U;
+    CHECK(sdram_create(&config, &d) == STM_ERR_INVALID_CONFIG && calls == 0U);
+    device = sdram_device_w9825g6kh_6;
+    device.max_clock_hz = 90000000U;
+    CHECK(sdram_create(&config, &d) == STM_ERR_INVALID_CONFIG && calls == 0U);
+    device = sdram_device_w9825g6kh_6;
+    device.cas_mask = 1U << 2U;
+    CHECK(sdram_create(&config, &d) == STM_ERR_INVALID_CONFIG && calls == 0U);
+    device = sdram_device_w9825g6kh_6;
+    device.auto_refresh_cycles = 17U;
+    CHECK(sdram_create(&config, &d) == STM_ERR_INVALID_ARG && calls == 0U);
+    device = sdram_device_w9825g6kh_6;
+    for (unsigned i = 0U; i < 7U; ++i) {
+        h = fixture();
+        unsigned bank = i == 3U || i == 5U ? 0U : 1U;
+        h.Instance->SDTR[bank] &= ~(15U << (4U * i));
+        CHECK(sdram_create(&config, &d) == STM_ERR_INVALID_CONFIG && calls == 0U && live_allocations == 0U);
+    }
+    h = fixture();
+    device.timing_ns[2] = 0U; device.timing_cycles[2] = 0U;
+    CHECK(sdram_create(&config, &d) == STM_ERR_INVALID_ARG && calls == 0U);
+    device = sdram_device_w9825g6kh_6;
+    device.refresh_period_ms = 32U;
+    device.startup_delay_ms = 7U;
+    device.auto_refresh_cycles = 4U;
+    CHECK(sdram_create(&config, &d) == STM_OK);
+    CHECK(refresh_value == 338U && delays == 10U && commands[2].AutoRefreshNumber == 4U);
+    device.row_bits = 1U; device.bus_width_bits = 8U;
+    CHECK(info(d).row_bits == 13U && info(d).column_bits == 9U && info(d).bus_width_bits == 16U);
+    CHECK(info(d).internal_banks == 4U && info(d).cas_latency == 3U);
+    CHECK(sdram_delete(&d) == STM_OK && live_allocations == 0U);
+    return 0;
 }
 
 // 验证初始化、边界检查和读写自检
@@ -381,7 +444,7 @@ int test_handle_entry(void)
 {
     SDRAM_HandleTypeDef h = fixture();
     sdram_handle_t d = NULL, second = NULL;
-    sdram_config_t config = {.hal = &h, .refresh_period_ms = 64U};
+    sdram_config_t config = {.hal = &h, .device = &sdram_device_w9825g6kh_6};
     CHECK(sdram_create(NULL, &d) == STM_ERR_INVALID_ARG && d == NULL);
     CHECK(sdram_create(&config, NULL) == STM_ERR_INVALID_ARG);
     CHECK(sdram_get_info(NULL, NULL) == STM_ERR_INVALID_ARG);
@@ -392,7 +455,7 @@ int test_handle_entry(void)
     for (unsigned cycle = 0; cycle < 20U; ++cycle) {
         h = fixture();
         config.hal = &h;
-        config.refresh_period_ms = 64U;
+        config.device = &sdram_device_w9825g6kh_6;
         CHECK(sdram_create(&config, &d) == STM_OK && d != NULL);
         CHECK(live_allocations == 1U);
         sdram_handle_t saved = d;
@@ -403,7 +466,7 @@ int test_handle_entry(void)
         CHECK(sdram_create(&config, &second) == STM_ERR_INVALID_STATE && second == NULL);
         CHECK(calls == before && live_allocations == 1U);
         config.hal = NULL;
-        config.refresh_period_ms = 0;
+        config.device = NULL;
         CHECK(info(d).ready);
         CHECK(sdram_get_info(d, NULL) == STM_ERR_INVALID_ARG);
         __disable_irq();

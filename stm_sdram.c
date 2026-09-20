@@ -1,132 +1,12 @@
 /**
  * @file    stm_sdram.c
- * @brief   STM32H7 FMC SDRAM 上电、刷新、16 位访问和自检实现
+ * @brief   SDRAM 通用生命周期、16 位访问和自检实现
  */
-#include "stm_sdram.h"
+#include "private/sdram_internal.h"
 #include <stdlib.h>
-
-struct sdram_context {
-    SDRAM_HandleTypeDef *hal;          // 绑定的 FMC SDRAM 句柄
-    uintptr_t base;                    // SDRAM 映射起始地址
-    uint32_t size_bytes;               // SDRAM 容量，单位字节
-    uint32_t clock_hz;                 // SDRAM 时钟频率，单位 Hz，向下取整
-    uint32_t refresh_count;            // FMC 自动刷新计数值
-    HAL_StatusTypeDef last_hal_status; // 最近一次命令或刷新设置的 HAL 状态
-    uint8_t ready;                     // 非零允许接口访问，不代表自检通过；调用者不得修改
-    struct sdram_context *next; // 当前组件的实例链表
-};
 
 static sdram_handle_t g_devices = NULL;
 
-
-// HAL H7 V1.13.0 忽略命令 Timeout；HAL_Delay 要求 tick 正常运行。
-#define SDRAM_COMMAND_TIMEOUT_MS 100U
-#define SDRAM_STARTUP_DELAY_MS 1U
-#define SDRAM_AUTO_REFRESH_CYCLES 8U
-
-// 发送 SDRAM 命令并等待完成
-static stm_err_t sdram_send_command(sdram_handle_t dev, uint32_t mode,
-                                      uint32_t refreshes, uint32_t mode_register)
-{
-    FMC_SDRAM_CommandTypeDef command = {0};
-    command.CommandMode = mode;
-    command.CommandTarget = dev->hal->Init.SDBank == FMC_SDRAM_BANK1
-                                ? FMC_SDRAM_CMD_TARGET_BANK1 : FMC_SDRAM_CMD_TARGET_BANK2;
-    command.AutoRefreshNumber = refreshes;
-    command.ModeRegisterDefinition = mode_register;
-    dev->last_hal_status = HAL_SDRAM_SendCommand(dev->hal, &command,
-                                                SDRAM_COMMAND_TIMEOUT_MS);
-    if (dev->last_hal_status != HAL_OK) {
-        return dev->last_hal_status == HAL_TIMEOUT ? STM_ERR_TIMEOUT : STM_ERR_IO;
-    }
-    // 命令间等待 1 ms，覆盖 tRP、8*tRFC 和 tMRD。
-    HAL_Delay(SDRAM_STARTUP_DELAY_MS);
-    return STM_OK;
-}
-
-// 初始化 SDRAM 并设置自动刷新
-static stm_err_t sdram_init_device(sdram_handle_t dev, SDRAM_HandleTypeDef *hal,
-                                uint32_t refresh_period_ms)
-{
-    uint32_t rows, columns, banks, cas, divider, kernel_hz;
-    uint64_t refresh;
-    stm_err_t status;
-
-    if (dev == NULL || hal == NULL || refresh_period_ms == 0U || refresh_period_ms > 1000U) {
-        return STM_ERR_INVALID_ARG;
-    }
-    if (__get_IPSR() != 0U || __get_PRIMASK() != 0U ||
-        __get_BASEPRI() != 0U || __get_FAULTMASK() != 0U) {
-        return STM_ERR_INVALID_CONTEXT;
-    }
-    HAL_SDRAM_StateTypeDef hal_state = HAL_SDRAM_GetState(hal);
-    if (dev->ready != 0U || hal->Instance != FMC_SDRAM_DEVICE ||
-        hal_state != HAL_SDRAM_STATE_READY ||
-        hal->Init.MemoryDataWidth != FMC_SDRAM_MEM_BUS_WIDTH_16 ||
-        hal->Init.ReadBurst != FMC_SDRAM_RBURST_DISABLE ||
-        (hal->Init.SDBank != FMC_SDRAM_BANK1 && hal->Init.SDBank != FMC_SDRAM_BANK2) ||
-        hal->Init.WriteProtection != FMC_SDRAM_WRITE_PROTECTION_DISABLE) {
-        return STM_ERR_INVALID_CONFIG;
-    }
-    switch (hal->Init.RowBitsNumber) {
-    case FMC_SDRAM_ROW_BITS_NUM_11: rows = 11U; break;
-    case FMC_SDRAM_ROW_BITS_NUM_12: rows = 12U; break;
-    case FMC_SDRAM_ROW_BITS_NUM_13: rows = 13U; break;
-    default: return STM_ERR_INVALID_CONFIG;
-    }
-    switch (hal->Init.ColumnBitsNumber) {
-    case FMC_SDRAM_COLUMN_BITS_NUM_8: columns = 8U; break;
-    case FMC_SDRAM_COLUMN_BITS_NUM_9: columns = 9U; break;
-    case FMC_SDRAM_COLUMN_BITS_NUM_10: columns = 10U; break;
-    case FMC_SDRAM_COLUMN_BITS_NUM_11: columns = 11U; break;
-    default: return STM_ERR_INVALID_CONFIG;
-    }
-    switch (hal->Init.InternalBankNumber) {
-    case FMC_SDRAM_INTERN_BANKS_NUM_2: banks = 2U; break;
-    case FMC_SDRAM_INTERN_BANKS_NUM_4: banks = 4U; break;
-    default: return STM_ERR_INVALID_CONFIG;
-    }
-    switch (hal->Init.CASLatency) {
-    case FMC_SDRAM_CAS_LATENCY_2: cas = 2U; break;
-    case FMC_SDRAM_CAS_LATENCY_3: cas = 3U; break;
-    default: return STM_ERR_INVALID_CONFIG;
-    }
-    switch (hal->Init.SDClockPeriod) {
-    case FMC_SDRAM_CLOCK_PERIOD_2: divider = 2U; break;
-    case FMC_SDRAM_CLOCK_PERIOD_3: divider = 3U; break;
-    default: return STM_ERR_INVALID_CONFIG;
-    }
-    // H7 HAL 的通用外设频率查询不支持 FMC；HCLK 来源直接读取总线频率。
-    kernel_hz = __HAL_RCC_GET_FMC_SOURCE() == RCC_FMCCLKSOURCE_HCLK
-                    ? HAL_RCC_GetHCLKFreq() : 0U;
-    // 刷新间隔向下取整，并预留 20 个 SDCLK。
-    refresh = ((uint64_t)kernel_hz * refresh_period_ms) /
-              ((uint64_t)divider * 1000U * (1UL << rows));
-    if (refresh <= 20U || refresh - 20U > 8191U) {
-        return STM_ERR_INVALID_CONFIG;
-    }
-    dev->hal = hal;
-    dev->base = hal->Init.SDBank == FMC_SDRAM_BANK1 ? 0xC0000000UL : 0xD0000000UL;
-    dev->size_bytes = (1UL << (rows + columns)) * banks * 2U;
-    dev->clock_hz = kernel_hz / divider;
-    dev->refresh_count = (uint32_t)refresh - 20U;
-    dev->last_hal_status = HAL_OK;
-
-    status = sdram_send_command(dev, FMC_SDRAM_CMD_CLK_ENABLE, 1U, 0U);
-    if (status != STM_OK) { return status; }
-    status = sdram_send_command(dev, FMC_SDRAM_CMD_PALL, 1U, 0U);
-    if (status != STM_OK) { return status; }
-    status = sdram_send_command(dev, FMC_SDRAM_CMD_AUTOREFRESH_MODE, SDRAM_AUTO_REFRESH_CYCLES, 0U);
-    if (status != STM_OK) { return status; }
-    // BL=1、顺序突发、CAS 位于 A6:A4、标准模式、单位置写突发。
-    status = sdram_send_command(dev, FMC_SDRAM_CMD_LOAD_MODE, 1U, (cas << 4U) | (1UL << 9U));
-    if (status != STM_OK) { return status; }
-    dev->last_hal_status = HAL_SDRAM_ProgramRefreshRate(hal, dev->refresh_count);
-    if (dev->last_hal_status != HAL_OK) { return dev->last_hal_status == HAL_TIMEOUT ? STM_ERR_TIMEOUT : STM_ERR_IO; }
-    __DSB();
-    dev->ready = 1U;
-    return STM_OK;
-}
 
 // 检查实例状态、对齐和访问范围
 static stm_err_t sdram_check_range(sdram_handle_t dev, uint32_t offset_bytes, size_t count)
@@ -275,14 +155,14 @@ stm_err_t sdram_test_ex(sdram_handle_t dev, uint32_t offset_bytes,
 // 创建对象并独占对应外设
 stm_err_t sdram_create(const sdram_config_t *config, sdram_handle_t *out_handle)
 {
-    if (config == NULL || out_handle == NULL || config->hal == NULL) { return STM_ERR_INVALID_ARG; }
+    if (config == NULL || out_handle == NULL || config->hal == NULL || config->device == NULL) { return STM_ERR_INVALID_ARG; }
     if (*out_handle != NULL) { return STM_ERR_INVALID_STATE; }
     if (__get_IPSR() != 0U || __get_PRIMASK() != 0U ||
         __get_BASEPRI() != 0U || __get_FAULTMASK() != 0U) { return STM_ERR_INVALID_CONTEXT; }
     if (g_devices != NULL) { return STM_ERR_INVALID_STATE; }
     sdram_handle_t dev = calloc(1U, sizeof(*dev));
     if (dev == NULL) { return STM_ERR_NO_MEM; }
-    stm_err_t err = sdram_init_device(dev, config->hal, config->refresh_period_ms);
+    stm_err_t err = sdram_init_device(dev, config->hal, config->device);
     if (err != STM_OK) { free(dev); return err; }
     dev->next = g_devices;
     g_devices = dev;
@@ -311,6 +191,11 @@ stm_err_t sdram_delete(sdram_handle_t *handle)
 stm_err_t sdram_get_info(sdram_handle_t handle, sdram_info_t *info)
 {
     if (handle == NULL || info == NULL) { return STM_ERR_INVALID_ARG; }
+    info->row_bits = handle->device.row_bits;
+    info->column_bits = handle->device.column_bits;
+    info->internal_banks = handle->device.internal_banks;
+    info->bus_width_bits = handle->device.bus_width_bits;
+    info->cas_latency = handle->cas_latency;
     info->base = handle->base;
     info->size_bytes = handle->size_bytes;
     info->clock_hz = handle->clock_hz;
