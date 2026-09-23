@@ -1,28 +1,24 @@
-# 软件测试
+# stm_sdram 验证
 
-编译真实 `stm_sdram.c`，使用 HAL 桩和 Unicorn 执行 Cortex-M7 指令，不连接开发板。需要 ARM GCC、Python 3，以及提供 STM32H7 HAL/CMSIS 头文件的 CubeMX 工程。共享测试分配器来自同级 [stm_common](https://github.com/NingZiXi/stm_common)。
+## 无 HAL 原生测试
 
-在当前组件仓库根目录运行（以下为 Windows PowerShell 示例）：
-
-```powershell
-python -m venv .venv
-.venv/Scripts/python -m pip install -r tests/requirements.txt
-.venv/Scripts/python tests/run_tests.py --project-root D:/path/to/stm32h7-project
+```sh
+cmake -S tests/portable -B build/portable -G Ninja -DCMAKE_BUILD_TYPE=Debug
+cmake --build build/portable
+ctest --test-dir build/portable --output-on-failure
 ```
 
-Linux/macOS 使用 `.venv/bin/python`。运行器可自动向上查找 CubeMX 工程；独立克隆时建议显式传 `--project-root`。
-非标准目录可重复传 `--include` 指定 HAL、HAL 配置和 CMSIS 目录；显式 include 且未指定 project-root 时不自动加宿主路径。
-`--compiler` 指定编译器，`--mcu` 默认 STM32H723xx，`--build-dir` 指定产物目录，`--python-deps` 指定预安装 Python 依赖目录。切换 MCU 宏不表示新芯片已获硬件验证。
+只包含 C/C++ 标准库、组件公开头和 stm_common，不提供 HAL/CMSIS 路径或 MCU 宏。
+覆盖独立上下文、器件配置、错误路径、边界与生命周期；Flash 另外覆盖自定义操作、显式 ID 不匹配、AUTO 歧义拒绝、传输分块和 tick 回绕；SDRAM 覆盖通用上电顺序、配置副作用前校验、参数快照和自检。
 
-已验证 GNU Arm GCC 12.3.1、Unicorn 2.1.4、pyelftools 0.32；在 O0/O2/Os 下使用 Wall/Wextra/Werror，失败返回非零退出码和 C 测试行号。
+## 真实 HAL 结构与 ARM 模型回归
 
-## 覆盖范围
+```sh
+python tests/run_tests.py --include /path/to/hal-config --include /path/to/hal/Inc --include /path/to/device/Include --include /path/to/cmsis/Core/Include --mcu STM32H757xx  --build-dir build/h757-tests
+```
 
-- v3 预置/自定义器件参数、行列与 CAS 不匹配、频率限制、七项实际时序及 Bank2 共享字段、启动等待、刷新周期和参数快照。
+运行器编译实际核心及选定适配器，使用 HAL 桩与 Unicorn Cortex-M7 执行 O0/O2/Os。H723 使用 STM32H723xx。可用 --compiler 指定 ARM GCC 路径。
+需要 requirements.txt 中的 Python 依赖。测试适配代码模拟 BSP 传入有效时钟，不在核心注入 MCU 依赖。
 
-- 创建分配失败、失败资源回收、重复创建、配置快照、删除清空、20 次创建/删除循环及泄漏/重复释放检查。
-- HAL 配置、调用上下文、地址和长度溢出、容量边界。
-- 初始化命令顺序、Bank/CAS/刷新计算、每步 HAL 失败、恢复后重建。
-- 16 位访问对齐、跨 16 MiB、子区域边界、进度单调及各通知点取消、数据位固定和地址混叠故障。
-
-模型不模拟 GPIO、电源、真实外设时序、MPU/Cache 或器件内部电路。软件通过不能替代硬件验证；实板覆盖范围见 [README](../README.md#验证)。
+保留原有容量、时序/协议、保护、超时、失败回收和数据故障测试；模拟不会验证电气、真实刷新保持时间或板级信号完整性。
+开发板验证必须另行执行，未连接硬件时不能称为板测通过。公共发布前完成约定的板级验证。

@@ -1,0 +1,7 @@
+cmake_minimum_required(VERSION 3.22)
+add_library(stm_sdram_fmc STATIC sdram_fmc.c)
+target_include_directories(stm_sdram_fmc PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(stm_sdram_fmc PUBLIC stm_sdram)
+if(TARGET stm32cubemx)
+    target_link_libraries(stm_sdram_fmc PUBLIC stm32cubemx)
+endif()

@@ -76,7 +76,7 @@ def main():
     if not project and not args.include:
         project = next((p for p in COMPONENT.parents if (p / "Core/Inc").is_dir()
                         and (p / "Drivers/STM32H7xx_HAL_Driver/Inc").is_dir()), None)
-    includes = [COMPONENT, COMPONENT.parent / "stm_common"]
+    includes = [COMPONENT / "include", COMPONENT / "adapters/stm32_hal", COMPONENT.parent / "stm_common"]
     if project:
         includes += [project / path for path in ("Core/Inc", "Drivers/STM32H7xx_HAL_Driver/Inc",
                      "Drivers/CMSIS/Device/ST/STM32H7xx/Include", "Drivers/CMSIS/Include")]
@@ -95,16 +95,19 @@ def main():
         binary = output / f"test{optimize}.elf"
         command = [compiler, "-mcpu=cortex-m7", "-mthumb", "-mfloat-abi=soft",
                    "-std=c11", optimize, "-g", "-Wall", "-Wextra", "-Werror", "-fno-builtin",
-                   "-DUSE_HAL_DRIVER", f"-D{args.mcu}", "-nostdlib",
+                   "-DUSE_HAL_DRIVER", "-DCORE_CM7", f"-D{args.mcu}", "-nostdlib",
                    "-Wl,-Ttext=0x11000,-Tdata=0x20000000,-e,test_entry"]
         command += [f"-I{path}" for path in includes]
-        command += [str(COMPONENT / "stm_sdram.c"), str(COMPONENT / "private/sdram_devices.c"),
-                    str(COMPONENT / "private/sdram_fmc_h7.c"), str(Path(__file__).with_name("test_sdram.c")),
+        command += ['-DSTM_SDRAM_HAL_HEADER="stm32h7xx_hal.h"']
+        command += [str(p) for p in sorted((COMPONENT / "src").rglob("*.c"))]
+        command += [str(COMPONENT / "adapters/stm32_hal" / ("sdram_fmc.c")),
+                    str(Path(__file__).with_name("test_sdram.c")),
                     "-lgcc", "-o", str(binary)]
         subprocess.run(command, check=True)
         with binary.open("rb") as stream:
             elf = ELFFile(stream)
             run(elf, "test_entry")
+            run(elf, "test_is42_entry")
             run(elf, "test_handle_entry")
             run(elf, "test_v3_entry")
             run(elf, "test_lifecycle_entry")

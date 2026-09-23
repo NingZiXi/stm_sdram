@@ -3,14 +3,51 @@
  * @brief   使用 HAL 桩验证 SDRAM 驱动及故障处理
  */
 #include "stm_sdram.h"
+#include "sdram_fmc.h"
 #include "tests/test_allocator.h"
+#if defined(RCC_FMCCLKSOURCE_D1HCLK)
+#define RCC_FMCCLKSOURCE_HCLK RCC_FMCCLKSOURCE_D1HCLK
+#endif
 
-#define CHECK(expr) do { if (!(expr)) { return __LINE__; } } while (0)
+#define CHECK(expr)                                                                                          \
+    do                                                                                                       \
+    {                                                                                                        \
+        if (!(expr))                                                                                         \
+        {                                                                                                    \
+            return __LINE__;                                                                                 \
+        }                                                                                                    \
+    } while (0)
 
 static uint32_t calls, delays, refresh_value, fail_call, kernel_clock;
 static FMC_SDRAM_CommandTypeDef commands[4];
 static HAL_StatusTypeDef injected_status;
 
+static sdram_fmc_context_t contexts[8];
+static sdram_controller_t test_bind(SDRAM_HandleTypeDef *hal)
+{
+    if (!hal)
+    {
+        return (sdram_controller_t){0};
+    }
+    for (unsigned i = 0U; i < 8U; ++i)
+    {
+        if (!contexts[i].hal || contexts[i].hal == hal)
+        {
+            return sdram_fmc_bind(&contexts[i], hal, kernel_clock);
+        }
+    }
+    return (sdram_controller_t){0};
+}
+static stm_err_t test_create(const sdram_config_t *c, sdram_handle_t *out)
+{
+    if (c && c->controller.ctx)
+    {
+        sdram_fmc_context_t *p = c->controller.ctx;
+        p->kernel_clock_hz = __HAL_RCC_GET_FMC_SOURCE() == RCC_FMCCLKSOURCE_HCLK ? kernel_clock : 0U;
+    }
+    return sdram_create(c, out);
+}
+#define sdram_create test_create
 
 // 用简短测试配置调用公开创建接口
 static stm_err_t create_device(sdram_handle_t *out, SDRAM_HandleTypeDef *hal, uint32_t value)
@@ -18,11 +55,12 @@ static stm_err_t create_device(sdram_handle_t *out, SDRAM_HandleTypeDef *hal, ui
     sdram_device_t device = sdram_device_w9825g6kh_6;
     device.refresh_period_ms = value;
     // 现有几何推导测试使用显式自定义参数；预置不接受错误行列。
-    if (hal != NULL && hal->Init.RowBitsNumber == FMC_SDRAM_ROW_BITS_NUM_12) {
+    if (hal != NULL && hal->Init.RowBitsNumber == FMC_SDRAM_ROW_BITS_NUM_12)
+    {
         device.row_bits = 12U;
         device.cas_mask = 1U << 2U;
     }
-    const sdram_config_t config = {.hal = hal, .device = &device};
+    const sdram_config_t config = {.controller = test_bind(hal), .device = &device};
     return sdram_create(&config, out);
 }
 
@@ -39,7 +77,10 @@ void *memcpy(void *dst, const void *src, size_t size)
 {
     uint8_t *out = dst;
     const uint8_t *in = src;
-    while (size-- != 0U) { *out++ = *in++; }
+    while (size-- != 0U)
+    {
+        *out++ = *in++;
+    }
     return dst;
 }
 
@@ -47,7 +88,10 @@ void *memcpy(void *dst, const void *src, size_t size)
 void *memset(void *dst, int value, size_t size)
 {
     unsigned char *out = dst;
-    while (size-- != 0U) { *out++ = (unsigned char)value; }
+    while (size-- != 0U)
+    {
+        *out++ = (unsigned char)value;
+    }
     return dst;
 }
 
@@ -69,16 +113,25 @@ HAL_SDRAM_StateTypeDef HAL_SDRAM_GetState(const SDRAM_HandleTypeDef *hal)
     return hal->State;
 }
 // 累计模拟延时
-void HAL_Delay(uint32_t ms) { delays += ms; }
+void HAL_Delay(uint32_t ms)
+{
+    delays += ms;
+}
 // 记录命令并注入 HAL 故障
-HAL_StatusTypeDef HAL_SDRAM_SendCommand(SDRAM_HandleTypeDef *hal,
-                                      FMC_SDRAM_CommandTypeDef *command, uint32_t timeout)
+HAL_StatusTypeDef HAL_SDRAM_SendCommand(SDRAM_HandleTypeDef *hal, FMC_SDRAM_CommandTypeDef *command,
+                                        uint32_t timeout)
 {
     (void)timeout;
-    if (calls < 4U) { commands[calls] = *command; }
-    if (++calls == fail_call) { return injected_status; }
-    hal->State = command->CommandMode == FMC_SDRAM_CMD_PALL
-                     ? HAL_SDRAM_STATE_PRECHARGED : HAL_SDRAM_STATE_READY;
+    if (calls < 4U)
+    {
+        commands[calls] = *command;
+    }
+    if (++calls == fail_call)
+    {
+        return injected_status;
+    }
+    hal->State =
+        command->CommandMode == FMC_SDRAM_CMD_PALL ? HAL_SDRAM_STATE_PRECHARGED : HAL_SDRAM_STATE_READY;
     return HAL_OK;
 }
 // 记录刷新计数并注入 HAL 故障
@@ -109,9 +162,48 @@ static SDRAM_HandleTypeDef fixture(void)
     h.Init.ReadBurst = FMC_SDRAM_RBURST_DISABLE;
     h.Init.WriteProtection = FMC_SDRAM_WRITE_PROTECTION_DISABLE;
     // 2/8/5/7/3/2/2 周期，与参考板 FMC 配置一致。
-    h.Instance->SDTR[0] = h.Instance->SDTR[1] = 1U | (7U << 4U) | (4U << 8U) |
-        (6U << 12U) | (2U << 16U) | (1U << 20U) | (1U << 24U);
+    h.Instance->SDTR[0] = h.Instance->SDTR[1] =
+        1U | (7U << 4U) | (4U << 8U) | (6U << 12U) | (2U << 16U) | (1U << 20U) | (1U << 24U);
     return h;
+}
+
+// H757 板载 12 行位 / 9 列位 / 32 位：容量仍为 32 MiB，刷新行数为 4096。
+int test_is42_entry(void)
+{
+    SDRAM_HandleTypeDef h = fixture();
+    h.Init.RowBitsNumber = FMC_SDRAM_ROW_BITS_NUM_12;
+    h.Init.MemoryDataWidth = FMC_SDRAM_MEM_BUS_WIDTH_32;
+    kernel_clock = 240000000U;
+    h.Instance->SDTR[0] = h.Instance->SDTR[1] =
+        1U | (5U << 4U) | (3U << 8U) | (5U << 12U) | (2U << 16U) | (1U << 20U) | (1U << 24U);
+    sdram_handle_t d = NULL;
+    sdram_config_t config = {.controller = test_bind(&h), .device = &sdram_device_is42s32800j_7};
+    CHECK(sdram_create(&config, &d) == STM_OK);
+    CHECK(info(d).size_bytes == 33554432U && info(d).bus_width_bits == 32U);
+    CHECK(info(d).clock_hz == 80000000U && refresh_value == 1230U);
+    CHECK(commands[3].ModeRegisterDefinition == 0x230U);
+    const uint16_t tx[4] = {0xA55AU, 0x1234U, 0xFEDCU, 0x55AAU};
+    uint16_t rx[4];
+    CHECK(sdram_write16(d, 33554424U, tx, 4U) == STM_OK);
+    CHECK(sdram_read16(d, 33554424U, rx, 4U) == STM_OK);
+    for (unsigned i = 0U; i < 4U; ++i)
+    {
+        CHECK(rx[i] == tx[i]);
+    }
+    CHECK(sdram_read16(d, 33554430U, rx, 2U) == STM_ERR_OUT_OF_RANGE);
+    CHECK(sdram_test(d, 0U, 4096U, NULL) == STM_OK);
+    CHECK(sdram_delete(&d) == STM_OK);
+    h.Init.MemoryDataWidth = FMC_SDRAM_MEM_BUS_WIDTH_16;
+    calls = 0U;
+    CHECK(sdram_create(&config, &d) == STM_ERR_INVALID_CONFIG && calls == 0U);
+    h.Init.MemoryDataWidth = FMC_SDRAM_MEM_BUS_WIDTH_32;
+    h.Init.SDClockPeriod = FMC_SDRAM_CLOCK_PERIOD_2;
+    CHECK(sdram_create(&config, &d) == STM_ERR_INVALID_CONFIG && calls == 0U);
+    h.Init.SDClockPeriod = FMC_SDRAM_CLOCK_PERIOD_3;
+    h.Instance->SDTR[0] &= ~(15U << 20U);
+    CHECK(sdram_create(&config, &d) == STM_ERR_INVALID_CONFIG && calls == 0U);
+    CHECK(!live_allocations && !invalid_frees);
+    return 0;
 }
 
 // 验证器件参数、实际 FMC 时序、共享字段与配置快照。
@@ -120,7 +212,7 @@ int test_v3_entry(void)
     SDRAM_HandleTypeDef h = fixture();
     sdram_handle_t d = NULL;
     sdram_device_t device = sdram_device_w9825g6kh_6;
-    sdram_config_t config = {.hal = &h, .device = &device};
+    sdram_config_t config = {.controller = test_bind(&h), .device = &device};
     config.device = NULL;
     CHECK(sdram_create(&config, &d) == STM_ERR_INVALID_ARG && calls == 0U);
     config.device = &device;
@@ -136,14 +228,16 @@ int test_v3_entry(void)
     device.auto_refresh_cycles = 17U;
     CHECK(sdram_create(&config, &d) == STM_ERR_INVALID_ARG && calls == 0U);
     device = sdram_device_w9825g6kh_6;
-    for (unsigned i = 0U; i < 7U; ++i) {
+    for (unsigned i = 0U; i < 7U; ++i)
+    {
         h = fixture();
         unsigned bank = i == 3U || i == 5U ? 0U : 1U;
         h.Instance->SDTR[bank] &= ~(15U << (4U * i));
         CHECK(sdram_create(&config, &d) == STM_ERR_INVALID_CONFIG && calls == 0U && live_allocations == 0U);
     }
     h = fixture();
-    device.timing_ns[2] = 0U; device.timing_cycles[2] = 0U;
+    device.timing_ns[2] = 0U;
+    device.timing_cycles[2] = 0U;
     CHECK(sdram_create(&config, &d) == STM_ERR_INVALID_ARG && calls == 0U);
     device = sdram_device_w9825g6kh_6;
     device.refresh_period_ms = 32U;
@@ -151,7 +245,8 @@ int test_v3_entry(void)
     device.auto_refresh_cycles = 4U;
     CHECK(sdram_create(&config, &d) == STM_OK);
     CHECK(refresh_value == 338U && delays == 10U && commands[2].AutoRefreshNumber == 4U);
-    device.row_bits = 1U; device.bus_width_bits = 8U;
+    device.row_bits = 1U;
+    device.bus_width_bits = 8U;
     CHECK(info(d).row_bits == 13U && info(d).column_bits == 9U && info(d).bus_width_bits == 16U);
     CHECK(info(d).internal_banks == 4U && info(d).cas_latency == 3U);
     CHECK(sdram_delete(&d) == STM_OK && live_allocations == 0U);
@@ -173,27 +268,34 @@ int test_entry(void)
     CHECK(commands[2].AutoRefreshNumber == 8U);
     CHECK(commands[3].CommandMode == FMC_SDRAM_CMD_LOAD_MODE);
     CHECK(commands[3].ModeRegisterDefinition == 0x230U);
-    for (unsigned i = 0; i < 4U; ++i) {
+    for (unsigned i = 0; i < 4U; ++i)
+    {
         CHECK(commands[i].CommandTarget == FMC_SDRAM_CMD_TARGET_BANK2);
     }
     CHECK(create_device(&d, &h, 64U) == STM_ERR_INVALID_STATE && calls == 5U);
 
     // 逐个注入命令和刷新设置失败，失败实例禁止访问 RAM。
-    for (uint32_t at = 1U; at <= 5U; ++at) {
-        for (uint32_t code = HAL_ERROR; code <= HAL_TIMEOUT; ++code) {
-            h = fixture(); sdram_delete(&d);
-            fail_call = at; injected_status = (HAL_StatusTypeDef)code;
-            CHECK(create_device(&d, &h, 64U) == (injected_status == HAL_TIMEOUT ? STM_ERR_TIMEOUT : STM_ERR_IO));
+    for (uint32_t at = 1U; at <= 5U; ++at)
+    {
+        for (uint32_t code = HAL_ERROR; code <= HAL_TIMEOUT; ++code)
+        {
+            h = fixture();
+            sdram_delete(&d);
+            fail_call = at;
+            injected_status = (HAL_StatusTypeDef)code;
+            CHECK(create_device(&d, &h, 64U) ==
+                  (injected_status == HAL_TIMEOUT ? STM_ERR_TIMEOUT : STM_ERR_IO));
             CHECK(d == NULL && calls == at && live_allocations == 0U);
             CHECK(sdram_fill16(d, 0U, 0U, 1U) == STM_ERR_INVALID_ARG);
             // 失败不保留对象；板级恢复 HAL 后重新创建。
             h.State = HAL_SDRAM_STATE_READY;
             fail_call = calls = 0U;
             CHECK(create_device(&d, &h, 64U) == STM_OK);
-            CHECK(info(d).ready && calls == 5U && info(d).last_hal_status == HAL_OK);
+            CHECK(info(d).ready && calls == 5U && info(d).last_error == STM_OK);
         }
     }
-    h = fixture(); sdram_delete(&d);
+    h = fixture();
+    sdram_delete(&d);
     CHECK(create_device(NULL, &h, 64U) == STM_ERR_INVALID_ARG);
     CHECK(create_device(&d, NULL, 64U) == STM_ERR_INVALID_ARG);
     CHECK(create_device(&d, &h, 0U) == STM_ERR_INVALID_ARG);
@@ -210,11 +312,11 @@ int test_entry(void)
     context_status = create_device(&d, &h, 64U);
     __set_FAULTMASK(0U);
     CHECK(context_status == STM_ERR_INVALID_CONTEXT && calls == 0U);
-    const HAL_SDRAM_StateTypeDef invalid_states[] = {
-        HAL_SDRAM_STATE_RESET, HAL_SDRAM_STATE_BUSY, HAL_SDRAM_STATE_ERROR,
-        HAL_SDRAM_STATE_WRITE_PROTECTED, HAL_SDRAM_STATE_PRECHARGED
-    };
-    for (unsigned i = 0; i < sizeof(invalid_states) / sizeof(invalid_states[0]); ++i) {
+    const HAL_SDRAM_StateTypeDef invalid_states[] = {HAL_SDRAM_STATE_RESET, HAL_SDRAM_STATE_BUSY,
+                                                     HAL_SDRAM_STATE_ERROR, HAL_SDRAM_STATE_WRITE_PROTECTED,
+                                                     HAL_SDRAM_STATE_PRECHARGED};
+    for (unsigned i = 0; i < sizeof(invalid_states) / sizeof(invalid_states[0]); ++i)
+    {
         h.State = invalid_states[i];
         CHECK(create_device(&d, &h, 64U) == STM_ERR_INVALID_CONFIG && calls == 0U);
     }
@@ -234,7 +336,8 @@ int test_entry(void)
     CHECK(create_device(&d, &h, 64U) == STM_ERR_INVALID_CONFIG);
 
     // 验证 Bank、行列、CAS 和时钟变化后的推导结果。
-    h = fixture(); sdram_delete(&d);
+    h = fixture();
+    sdram_delete(&d);
     h.Init.SDBank = FMC_SDRAM_BANK1;
     h.Init.RowBitsNumber = FMC_SDRAM_ROW_BITS_NUM_12;
     h.Init.CASLatency = FMC_SDRAM_CAS_LATENCY_2;
@@ -245,31 +348,35 @@ int test_entry(void)
     CHECK(info(d).refresh_count == 1542U && commands[3].ModeRegisterDefinition == 0x220U);
     CHECK(commands[0].CommandTarget == FMC_SDRAM_CMD_TARGET_BANK1);
 
-    h = fixture(); sdram_delete(&d);
+    h = fixture();
+    sdram_delete(&d);
     CHECK(create_device(&d, &h, 64U) == STM_OK);
     uint16_t tx[4] = {0x1234, 0x5678, 0xA5A5, 0xFFFF}, rx[4] = {0};
     CHECK(sdram_write16(d, info(d).size_bytes - 8U, tx, 4U) == STM_OK);
     CHECK(sdram_read16(d, info(d).size_bytes - 8U, rx, 4U) == STM_OK);
-    for (unsigned i = 0; i < 4U; ++i) { CHECK(rx[i] == tx[i]); }
+    for (unsigned i = 0; i < 4U; ++i)
+    {
+        CHECK(rx[i] == tx[i]);
+    }
     CHECK(sdram_write16(d, 0U, tx, SIZE_MAX) == STM_ERR_OUT_OF_RANGE);
     CHECK(sdram_write16(d, info(d).size_bytes - 2U, tx, 2U) == STM_ERR_OUT_OF_RANGE);
     CHECK(sdram_read16(d, UINT32_MAX - 1U, rx, 1U) == STM_ERR_OUT_OF_RANGE);
     CHECK(sdram_read16(d, 1U, rx, 1U) == STM_ERR_INVALID_ARG);
     CHECK(sdram_write16(d, 0U, NULL, 1U) == STM_ERR_INVALID_ARG);
-    CHECK(sdram_write16(d, 0U, (uint16_t *)((uintptr_t)tx + 1U), 1U)
-          == STM_ERR_INVALID_ARG);
+    CHECK(sdram_write16(d, 0U, (uint16_t *)((uintptr_t)tx + 1U), 1U) == STM_ERR_INVALID_ARG);
     CHECK(sdram_read16(d, 0U, (uint16_t *)info(d).base, 1U) == STM_ERR_INVALID_ARG);
-    CHECK(sdram_write16(d, 0U, (uint16_t *)(info(d).base - 2U), 2U)
-          == STM_ERR_INVALID_ARG);
-    CHECK(sdram_read16(d, 0U, (uint16_t *)(UINTPTR_MAX - 1U), 1U)
-          == STM_ERR_INVALID_ARG);
+    CHECK(sdram_write16(d, 0U, (uint16_t *)(info(d).base - 2U), 2U) == STM_ERR_INVALID_ARG);
+    CHECK(sdram_read16(d, 0U, (uint16_t *)(UINTPTR_MAX - 1U), 1U) == STM_ERR_INVALID_ARG);
     CHECK(sdram_fill16(NULL, 0U, 0U, 1U) == STM_ERR_INVALID_ARG);
     CHECK(sdram_fill16(d, 1U, 0U, 0U) == STM_ERR_INVALID_ARG);
     CHECK(sdram_read16(d, info(d).size_bytes, NULL, 0U) == STM_OK);
     CHECK(sdram_fill16(d, info(d).size_bytes, 0U, 1U) == STM_ERR_OUT_OF_RANGE);
     CHECK(sdram_fill16(d, 0U, 0x5AA5, 4U) == STM_OK);
     CHECK(sdram_read16(d, 0U, rx, 4U) == STM_OK);
-    for (unsigned i = 0; i < 4U; ++i) { CHECK(rx[i] == 0x5AA5); }
+    for (unsigned i = 0; i < 4U; ++i)
+    {
+        CHECK(rx[i] == 0x5AA5);
+    }
     CHECK(sdram_test(d, 0U, 0U, NULL) == STM_ERR_INVALID_ARG);
     CHECK(sdram_test(d, 0U, 3U, NULL) == STM_ERR_INVALID_ARG);
     sdram_test_error_t error = {42U, 0xFFFF, 0xFFFF, 42U};
@@ -283,7 +390,10 @@ int test_entry(void)
     // 验证跨 16 MiB 边界读写及容量末端自检。
     CHECK(sdram_write16(d, 16U * 1024U * 1024U - 4U, tx, 4U) == STM_OK);
     CHECK(sdram_read16(d, 16U * 1024U * 1024U - 4U, rx, 4U) == STM_OK);
-    for (unsigned i = 0; i < 4U; ++i) { CHECK(rx[i] == tx[i]); }
+    for (unsigned i = 0; i < 4U; ++i)
+    {
+        CHECK(rx[i] == tx[i]);
+    }
     CHECK(sdram_test(d, 0U, 256U * 1024U, NULL) == STM_OK);
     CHECK(sdram_test(d, info(d).size_bytes - 4096U, 4096U, NULL) == STM_OK);
     CHECK(sdram_delete(&d) == STM_OK);
@@ -334,11 +444,12 @@ int test_address_fault_entry(void)
 }
 
 // 回调测试上下文
-typedef struct {
-    uint32_t calls;      // 已收到的通知次数
-    uint32_t cancel_at;  // 请求取消的通知序号，0 表示不取消
-    uint64_t previous;   // 上次已完成工作量
-    uint64_t total;      // 预期总工作量
+typedef struct
+{
+    uint32_t calls;     // 已收到的通知次数
+    uint32_t cancel_at; // 请求取消的通知序号，0 表示不取消
+    uint64_t previous;  // 上次已完成工作量
+    uint64_t total;     // 预期总工作量
     int invalid;        // 非零表示进度约束不满足
 } progress_context_t;
 
@@ -346,9 +457,9 @@ typedef struct {
 static int check_progress(uint64_t completed, uint64_t total, void *user)
 {
     progress_context_t *ctx = user;
-    if (total != ctx->total || completed > total ||
-        (ctx->calls == 0U && completed != 0U) ||
-        (ctx->calls != 0U && (completed <= ctx->previous || completed - ctx->previous > 4096U))) {
+    if (total != ctx->total || completed > total || (ctx->calls == 0U && completed != 0U) ||
+        (ctx->calls != 0U && (completed <= ctx->previous || completed - ctx->previous > 4096U)))
+    {
         ctx->invalid = 1;
     }
     ctx->previous = completed;
@@ -391,7 +502,8 @@ int test_lifecycle_entry(void)
     CHECK(error.offset_bytes == 0U && error.expected == 0U && error.actual == 0U && error.phase == 0U);
 
     // 覆盖起始、数据线、写入、校验、末次通知的取消。
-    for (uint32_t cancel = 1U; cancel <= 26U; ++cancel) {
+    for (uint32_t cancel = 1U; cancel <= 26U; ++cancel)
+    {
         ctx = (progress_context_t){0};
         ctx.total = 8194U * 8U + 128U;
         ctx.cancel_at = cancel;
@@ -402,7 +514,8 @@ int test_lifecycle_entry(void)
         CHECK(error.offset_bytes == 0U && error.expected == 0U && error.actual == 0U && error.phase == 0U);
         CHECK(sdram_read16(d, 0U, &data, 1U) == STM_OK && data == 0xA55AU);
         CHECK(sdram_read16(d, 8196U, &data, 1U) == STM_OK && data == 0xA55AU);
-        if (cancel == 1U) {
+        if (cancel == 1U)
+        {
             CHECK(sdram_read16(d, 2U, &data, 1U) == STM_OK && data == 0xA55AU);
         }
     }
@@ -444,7 +557,7 @@ int test_handle_entry(void)
 {
     SDRAM_HandleTypeDef h = fixture();
     sdram_handle_t d = NULL, second = NULL;
-    sdram_config_t config = {.hal = &h, .device = &sdram_device_w9825g6kh_6};
+    sdram_config_t config = {.controller = test_bind(&h), .device = &sdram_device_w9825g6kh_6};
     CHECK(sdram_create(NULL, &d) == STM_ERR_INVALID_ARG && d == NULL);
     CHECK(sdram_create(&config, NULL) == STM_ERR_INVALID_ARG);
     CHECK(sdram_get_info(NULL, NULL) == STM_ERR_INVALID_ARG);
@@ -452,9 +565,10 @@ int test_handle_entry(void)
     CHECK(sdram_create(&config, &d) == STM_ERR_NO_MEM);
     CHECK(d == NULL && live_allocations == 0U && calls == 0U);
     allocation_failure = 0;
-    for (unsigned cycle = 0; cycle < 20U; ++cycle) {
+    for (unsigned cycle = 0; cycle < 20U; ++cycle)
+    {
         h = fixture();
-        config.hal = &h;
+        config.controller = test_bind(&h);
         config.device = &sdram_device_w9825g6kh_6;
         CHECK(sdram_create(&config, &d) == STM_OK && d != NULL);
         CHECK(live_allocations == 1U);
@@ -462,10 +576,10 @@ int test_handle_entry(void)
         uint32_t before = calls;
         CHECK(sdram_create(&config, &d) == STM_ERR_INVALID_STATE && d == saved);
         SDRAM_HandleTypeDef alias = h;
-        config.hal = &alias;
+        config.controller = test_bind(&alias);
         CHECK(sdram_create(&config, &second) == STM_ERR_INVALID_STATE && second == NULL);
         CHECK(calls == before && live_allocations == 1U);
-        config.hal = NULL;
+        config.controller = test_bind(NULL);
         config.device = NULL;
         CHECK(info(d).ready);
         CHECK(sdram_get_info(d, NULL) == STM_ERR_INVALID_ARG);
