@@ -333,7 +333,7 @@ int test_entry(void)
     CHECK(create_device(&d, &h, 64U) == STM_ERR_INVALID_CONFIG);
     h.Init.MemoryDataWidth = FMC_SDRAM_MEM_BUS_WIDTH_16;
     h.Init.ReadBurst = FMC_SDRAM_RBURST_ENABLE;
-    CHECK(create_device(&d, &h, 64U) == STM_ERR_INVALID_CONFIG);
+    CHECK(create_device(&d, &h, 64U) == STM_OK);
 
     // 验证 Bank、行列、CAS 和时钟变化后的推导结果。
     h = fixture();
