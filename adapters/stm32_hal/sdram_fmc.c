@@ -20,7 +20,7 @@ static stm_err_t get_config(void *p, sdram_controller_info_t *info)
         return STM_ERR_INVALID_ARG;
     }
     if (hal->Instance != FMC_SDRAM_DEVICE || HAL_SDRAM_GetState(hal) != HAL_SDRAM_STATE_READY ||
-        hal->Init.ReadBurst != FMC_SDRAM_RBURST_DISABLE ||
+        (hal->Init.ReadBurst != FMC_SDRAM_RBURST_DISABLE && hal->Init.ReadBurst != FMC_SDRAM_RBURST_ENABLE) ||
         (hal->Init.SDBank != FMC_SDRAM_BANK1 && hal->Init.SDBank != FMC_SDRAM_BANK2) ||
         hal->Init.WriteProtection != FMC_SDRAM_WRITE_PROTECTION_DISABLE)
     {
